@@ -19,6 +19,9 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     
     // Address of the master implementation for our delegation proxies
     address public delegationContract;
+    
+    // Address of the CreationWrapper contract that can create delegation proxies on behalf of users
+    address public creationWrapper;
 
     // Mapping from eventId to its dedicated delegation proxy contract
     mapping(uint256 => address) public eventDelegationProxy;
@@ -29,12 +32,14 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     // --- Events ---
     event DelegationProxyCreated(uint256 indexed eventId, address proxyAddress, address indexed delegatee);
     event DelegateUpdated(uint256 indexed eventId, address indexed newDelegatee);
+    event CreationWrapperUpdated(address indexed newCreationWrapper);
 
     // --- Errors ---
     error OnlyEventCreator();
     error ProxyAlreadyExists();
     error NotAuthorized();
     error InvalidAddress();
+    error OnlyCreationWrapper();
 
     /**
      * @dev Initializes the EventManager.
@@ -47,6 +52,17 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         // Deploy the master implementation for our delegation contract
         // This is a one-time deployment. All proxies will point to this logic.
         delegationContract = address(new Delegation());
+    }
+
+    /**
+     * @dev Sets the CreationWrapper contract address. Only owner can call this.
+     */
+    function setCreationWrapper(address _creationWrapper) external onlyOwner {
+        if (_creationWrapper == address(0)) {
+            revert InvalidAddress();
+        }
+        creationWrapper = _creationWrapper;
+        emit CreationWrapperUpdated(_creationWrapper);
     }
 
     /**
@@ -75,6 +91,49 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         Delegation(proxy).initialize(eventId, address(eventFactory), delegatee);
 
         // 4. Store State
+        eventDelegationProxy[eventId] = proxy;
+        eventDelegates[eventId] = delegatee;
+
+        emit DelegationProxyCreated(eventId, proxy, delegatee);
+    }
+
+    /**
+     * @dev Deploys a delegation proxy on behalf of a user. Only the CreationWrapper can call this.
+     * This allows the CreationWrapper to create events and set up delegation in a single transaction.
+     * @param eventId The ID of the event to create a delegation proxy for.
+     * @param eventCreator The address of the event creator (who owns the NFT).
+     * @param delegatee The address that will be granted delegation powers.
+     */
+    function createDelegationProxyForUser(
+        uint256 eventId, 
+        address eventCreator, 
+        address delegatee
+    ) external {
+        // 1. Authorization Check: Only the CreationWrapper contract can call this
+        if (msg.sender != creationWrapper) {
+            revert OnlyCreationWrapper();
+        }
+        
+        // 2. Verify the eventCreator actually owns the NFT
+        if (eventFactory.ownerOf(eventId) != eventCreator) {
+            revert OnlyEventCreator();
+        }
+        
+        if (eventDelegationProxy[eventId] != address(0)) {
+            revert ProxyAlreadyExists();
+        }
+        if (delegatee == address(0)) {
+            revert InvalidAddress();
+        }
+
+        // 3. Deploy Proxy: Use the cheaper Clones library to deploy a minimal proxy.
+        // This proxy points to 'delegationContract'.
+        address proxy = Clones.clone(delegationContract);
+        
+        // 4. Initialize Proxy: Set the initial state of the new proxy contract.
+        Delegation(proxy).initialize(eventId, address(eventFactory), delegatee);
+
+        // 5. Store State
         eventDelegationProxy[eventId] = proxy;
         eventDelegates[eventId] = delegatee;
 

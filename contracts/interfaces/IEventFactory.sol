@@ -11,9 +11,11 @@ interface IEventFactory {
     struct EventData {
         address creator;
         uint256 startDate;
+        uint256 eventDuration;
         uint256 reservePrice;
         string metadataURI;
-        address ticketFactoryAddress;
+        string artCategory;
+        address ticketKioskAddress;
         bool finalized;
     }
 
@@ -24,7 +26,8 @@ interface IEventFactory {
         uint256 startDate,
         uint256 reservePrice,
         string metadataURI,
-        address ticketFactoryAddress
+        string artCategory,
+        address ticketKioskAddress
     );
     event MetadataUpdated(uint256 indexed eventId, string newMetadataURI);
     event ReservePriceUpdated(uint256 indexed eventId, uint256 newReservePrice);
@@ -37,8 +40,24 @@ interface IEventFactory {
      */
     function createEvent(
         uint256 startDate,
+        uint256 eventDuration,
         uint256 reservePrice,
         string calldata metadataURI,
+        string calldata artCategory,
+        uint256 ticketsAmount,
+        uint256 ticketPrice
+    ) external returns (uint256 eventId);
+
+    /**
+     * @dev Creates a new RTA NFT event for a specific creator.
+     */
+    function createEventForCreator(
+        address creator,
+        uint256 startDate,
+        uint256 eventDuration,
+        uint256 reservePrice,
+        string calldata metadataURI,
+        string calldata artCategory,
         uint256 ticketsAmount,
         uint256 ticketPrice
     ) external returns (uint256 eventId);
@@ -66,6 +85,16 @@ interface IEventFactory {
      * @dev Retrieves the complete data for a specific event.
      */
     function getEvent(uint256 eventId) external view returns (EventData memory);
+
+    /**
+     * @dev Returns the TicketKiosk address for a specific event.
+     */
+    function getTicketKiosk(uint256 eventId) external view returns (address);
+
+    /**
+     * @dev Returns all TicketKiosk addresses and their corresponding event IDs.
+     */
+    function getAllTicketKiosks() external view returns (uint256[] memory eventIds, address[] memory kioskAddresses);
 
     /**
      * @dev Returns the owner of the specified RTA NFT. From ERC721.

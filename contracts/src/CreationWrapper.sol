@@ -20,25 +20,31 @@ contract CreationWrapper {
     function createEventAndDelegate(
         // Params for EventFactory.createEvent
         uint256 startDate,
+        uint256 eventDuration,
         uint256 reservePrice,
         string calldata metadataURI,
+        string calldata artCategory,
         uint256 ticketsAmount,
         uint256 ticketPrice,
-        // Param for EventManager.createDelegationProxy
+        // Param for EventManager.createDelegationProxyForUser
         address delegatee
     ) external {
-        // 1. Call EventFactory to create the event and get the new eventId
-        uint256 newEventId = eventFactory.createEvent(
+        // 1. Call EventFactory to create the event for the user and get the new eventId
+        uint256 newEventId = eventFactory.createEventForCreator(
+            msg.sender, // The user who called this function
             startDate,
+            eventDuration,
             reservePrice,
             metadataURI,
+            artCategory,
             ticketsAmount,
             ticketPrice
         );
 
         // 2. Call EventManager to create the delegation proxy for the new event
+        // Use the new function that allows the CreationWrapper to create proxies on behalf of users
         if (delegatee != address(0)) {
-            eventManager.createDelegationProxy(newEventId, delegatee);
+            eventManager.createDelegationProxyForUser(newEventId, msg.sender, delegatee);
         }
     }
 }

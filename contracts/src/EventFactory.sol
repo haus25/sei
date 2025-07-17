@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721URIStorageUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Create2.sol";
-import "./TicketFactory.sol";
+import "./TicketKiosk.sol";
 import "../interfaces/IDistributor.sol";
 import "../interfaces/IEventManager.sol";
 import "../interfaces/ILiveTipping.sol";
@@ -15,18 +14,19 @@ import "../interfaces/ILiveTipping.sol";
  * @dev A lightweight, modular ERC721 NFT factory for RTA events.
  * Responsibilities:
  * 1. Mint Event NFTs (ERC721).
- * 2. Deploy a unique TicketFactory for each event.
+ * 2. Deploy a unique TicketKiosk for each event.
  * 3. Act as a central registry linking eventId to its data and associated contracts.
  * All other logic (Tipping, Curation, Event Management) is handled by standalone contracts.
  */
-contract EventFactory is Initializable, ERC721URIStorageUpgradeable, OwnableUpgradeable {
+contract EventFactory is ERC721URIStorage, Ownable {
     struct EventData {
         address creator;
         uint256 startDate;
         uint256 eventDuration;
         uint256 reservePrice;
         string metadataURI;
-        address ticketFactoryAddress;
+        string artCategory;
+        address KioskAddress;
         bool finalized;
     }
 
@@ -40,6 +40,7 @@ contract EventFactory is Initializable, ERC721URIStorageUpgradeable, OwnableUpgr
     address public eventManagerContract;
     address public distributorContract;
     address public liveTippingContract;
+    address public treasuryReceiver;
 
     // Events
     event EventCreated(
@@ -48,7 +49,8 @@ contract EventFactory is Initializable, ERC721URIStorageUpgradeable, OwnableUpgr
         uint256 startDate,
         uint256 reservePrice,
         string metadataURI,
-        address ticketFactoryAddress
+        string artCategory,
+        address ticketKioskAddress
     );
     event MetadataUpdated(uint256 indexed eventId, string newMetadataURI);
     event ReservePriceUpdated(uint256 indexed eventId, uint256 newPrice);
@@ -65,60 +67,104 @@ contract EventFactory is Initializable, ERC721URIStorageUpgradeable, OwnableUpgr
     error StartDateHasPassed();
 
     /**
-     * @dev Initializes the contract, setting the owner and addresses of service contracts.
+     * @dev Constructor that initializes the contract
+     */
+    constructor() ERC721("Real-Time Asset", "RTA") Ownable(msg.sender) {
+        // Initialize with deployer as owner initially
+        // The actual owner will be set during deployment
+    }
+
+    /**
+     * @dev Initializes the contract addresses after deployment
      */
     function initialize(
         address _owner,
         address _eventManager,
         address _distributor,
-        address _liveTipping
-    ) public initializer {
-        __ERC721_init("Real-Time Asset", "RTA");
-        __ERC721URIStorage_init();
-        __Ownable_init(_owner);
+        address _liveTipping,
+        address _treasuryReceiver
+    ) external {
+        // Only allow initialization once and only by the current owner
+        require(eventManagerContract == address(0), "Already initialized");
+        require(msg.sender == owner(), "Only owner can initialize");
+        
         eventManagerContract = _eventManager;
         distributorContract = _distributor;
         liveTippingContract = _liveTipping;
+        treasuryReceiver = _treasuryReceiver;
+        
+        // Transfer ownership to the intended owner if different
+        if (_owner != owner()) {
+            _transferOwnership(_owner);
+        }
     }
 
     /**
-     * @dev Creates a new RTA NFT event and deploys its associated TicketFactory.
+     * @dev Creates a new RTA NFT event and deploys its associated TicketKiosk.
      */
     function createEvent(
         uint256 startDate,
         uint256 eventDuration,
         uint256 reservePrice,
         string calldata metadataURI,
+        string calldata artCategory,
         uint256 ticketsAmount,
         uint256 ticketPrice
     ) external returns (uint256 eventId) {
+        return createEventForCreator(
+            msg.sender,
+            startDate,
+            eventDuration,
+            reservePrice,
+            metadataURI,
+            artCategory,
+            ticketsAmount,
+            ticketPrice
+        );
+    }
+
+    /**
+     * @dev Creates a new RTA NFT event for a specific creator and deploys its associated TicketKiosk.
+     * This version allows specifying the creator address, useful for wrapper contracts.
+     */
+    function createEventForCreator(
+        address creator,
+        uint256 startDate,
+        uint256 eventDuration,
+        uint256 reservePrice,
+        string calldata metadataURI,
+        string calldata artCategory,
+        uint256 ticketsAmount,
+        uint256 ticketPrice
+    ) public returns (uint256 eventId) {
         uint256 newEventId = currentEventId++;
 
         // 1. Mint RTA NFT to the creator
-        _safeMint(msg.sender, newEventId);
+        _safeMint(creator, newEventId);
         _setTokenURI(newEventId, metadataURI);
 
-        // 2. Deploy TicketFactory for this event using CREATE2 for a deterministic address
-        address ticketFactoryAddress = _deployTicketFactory(newEventId, ticketsAmount, ticketPrice);
-        if (ticketFactoryAddress == address(0)) revert DeploymentFailed();
+        // 2. Deploy TicketKiosk for this event using CREATE2 for a deterministic address
+        address ticketKioskAddress = _deployTicketKiosk(newEventId, creator, ticketsAmount, ticketPrice, artCategory);
+        if (ticketKioskAddress == address(0)) revert DeploymentFailed();
 
         // 3. Store event data
         events[newEventId] = EventData({
-            creator: msg.sender,
+            creator: creator,
             startDate: startDate,
             eventDuration: eventDuration,
             reservePrice: reservePrice,
             metadataURI: metadataURI,
-            ticketFactoryAddress: ticketFactoryAddress,
+            artCategory: artCategory,
+            KioskAddress: ticketKioskAddress,
             finalized: false
         });
 
-        creatorEvents[msg.sender].push(newEventId);
+        creatorEvents[creator].push(newEventId);
 
         // 4. Register the new event with the Distributor
-        IDistributor(distributorContract).registerEvent(newEventId, msg.sender);
+        IDistributor(distributorContract).registerEvent(newEventId, creator);
 
-        emit EventCreated(newEventId, msg.sender, startDate, reservePrice, metadataURI, ticketFactoryAddress);
+        emit EventCreated(newEventId, creator, startDate, reservePrice, metadataURI, artCategory, ticketKioskAddress);
         
         return newEventId;
     }
@@ -194,6 +240,29 @@ contract EventFactory is Initializable, ERC721URIStorageUpgradeable, OwnableUpgr
     }
     
     /**
+     * @dev Returns the TicketKiosk address for a specific event.
+     */
+    function getTicketKiosk(uint256 eventId) external view returns (address) {
+        return events[eventId].KioskAddress;
+    }
+
+    /**
+     * @dev Returns all TicketKiosk addresses and their corresponding event IDs.
+     */
+    function getAllTicketKiosks() external view returns (uint256[] memory eventIds, address[] memory kioskAddresses) {
+        uint256 totalEventsCount = currentEventId;
+        eventIds = new uint256[](totalEventsCount);
+        kioskAddresses = new address[](totalEventsCount);
+        
+        for (uint256 i = 0; i < totalEventsCount; i++) {
+            eventIds[i] = i;
+            kioskAddresses[i] = events[i].KioskAddress;
+        }
+        
+        return (eventIds, kioskAddresses);
+    }
+
+    /**
      * @dev Returns the full data struct for a given event.
      * For other contracts to easily get event data.
      */
@@ -223,16 +292,18 @@ contract EventFactory is Initializable, ERC721URIStorageUpgradeable, OwnableUpgr
     }
 
     // Internal & View Functions
-    function _deployTicketFactory(
-        uint256 eventId, 
+    function _deployTicketKiosk(
+        uint256 eventId,
+        address creator,
         uint256 ticketsAmount, 
-        uint256 ticketPrice
+        uint256 ticketPrice,
+        string memory artCategory
     ) internal returns (address) {
         bytes memory bytecode = abi.encodePacked(
-            type(TicketFactory).creationCode,
-            abi.encode(eventId, address(this), msg.sender, ticketsAmount, ticketPrice)
+            type(TicketKiosk).creationCode,
+            abi.encode(eventId, address(this), creator, ticketsAmount, ticketPrice, artCategory, treasuryReceiver)
         );
-        bytes32 salt = keccak256(abi.encodePacked(eventId, "ticketfactory"));
+        bytes32 salt = keccak256(abi.encodePacked(eventId, "ticketkiosk"));
         return Create2.deploy(0, salt, bytecode);
     }
 
@@ -241,11 +312,11 @@ contract EventFactory is Initializable, ERC721URIStorageUpgradeable, OwnableUpgr
     }
 
     // Override required by Solidity for multiple inheritance
-    function tokenURI(uint256 tokenId) public view override(ERC721URIStorageUpgradeable) returns (string memory) {
+    function tokenURI(uint256 tokenId) public view override(ERC721URIStorage) returns (string memory) {
         return super.tokenURI(tokenId);
     }
 
-    function supportsInterface(bytes4 interfaceId) public view override(ERC721URIStorageUpgradeable) returns (bool) {
+    function supportsInterface(bytes4 interfaceId) public view override(ERC721URIStorage) returns (bool) {
         return super.supportsInterface(interfaceId);
     }
 }

@@ -56,6 +56,9 @@ contract HausDeploymentScript is Script {
         // 4. Deploy the utility CreationWrapper
         creationWrapper = new CreationWrapper(address(eventFactory), address(eventManager));
         
+        // 5. Configure EventManager with CreationWrapper address
+        eventManager.setCreationWrapper(address(creationWrapper));
+        
         vm.stopBroadcast();
         _logDeploymentAddresses();
     }
@@ -97,7 +100,7 @@ contract HausDeploymentScript is Script {
         distributor = Distributor(payable(address(distributorProxy)));
 
         // Initialize EventFactory with all the deployed contract addresses
-        eventFactory.initialize(owner, address(eventManager), address(distributor), address(liveTipping));
+        eventFactory.initialize(owner, address(eventManager), address(distributor), address(liveTipping), treasuryReceiver);
         
         console2.log("All contracts deployed and initialized successfully.");
     }

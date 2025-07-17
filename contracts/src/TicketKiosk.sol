@@ -7,12 +7,12 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * @title TicketFactory
+ * @title TicketKiosk
  * @dev Creates and manages event tickets as NFTs per RTA event
  * Uses OpenZeppelin ERC721 standard for proper NFT implementation
  * Ticket naming: rta{eventId}_ticket{ticketId}
  */
-contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
+contract TicketKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
     struct TicketData {
         uint256 eventId;
         uint256 ticketId;
@@ -20,11 +20,16 @@ contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         uint256 purchasePrice;
         uint256 purchaseTimestamp;
         string name;         // e.g., "rta5_ticket34"
+        string artCategory;
+        uint256 ticketNumber;    // Sequential ticket number (1, 2, 3...)
+        uint256 totalTickets;    // Total number of tickets for this event
     }
 
     uint256 public eventId;
     address public eventFactoryAddress;
     address public creator;
+    address public treasuryReceiver;
+    string public artCategory;
 
     mapping(uint256 => TicketData) public tickets;           // ticketId => TicketData
     mapping(address => uint256[]) public userTickets;        // user => ticketIds[]
@@ -40,7 +45,15 @@ contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         uint256 indexed ticketId,
         address indexed buyer,
         string ticketName,
+        string artCategory,
         uint256 price
+    );
+
+    event RevenueDistributed(
+        address indexed creator,
+        address indexed treasury,
+        uint256 creatorAmount,
+        uint256 treasuryAmount
     );
 
     modifier onlyEventFactory() {
@@ -49,23 +62,27 @@ contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
     }
 
     /**
-     * @dev Constructor for per-event TicketFactory instance
+     * @dev Constructor for per-event TicketKiosk instance
      */
     constructor(
         uint256 _eventId,
         address _eventFactoryAddress,
         address _creator,
         uint256 _ticketsAmount,
-        uint256 _ticketPrice
+        uint256 _ticketPrice,
+        string memory _artCategory,
+        address _treasuryReceiver
     ) ERC721(
-        string(abi.encodePacked("HAUS Event ", _toString(_eventId), " Tickets")),
-        string(abi.encodePacked("HERT", _toString(_eventId)))
+        string(abi.encodePacked("RTA_Kiosk", _toString(_eventId), " Tickets", _toString(_ticketsAmount))),
+        string(abi.encodePacked("RTA", _toString(_eventId)))
     ) Ownable(_creator) {
         eventId = _eventId;
         eventFactoryAddress = _eventFactoryAddress;
         creator = _creator;
         ticketsAmount = _ticketsAmount;
         ticketPrice = _ticketPrice;
+        artCategory = _artCategory;
+        treasuryReceiver = _treasuryReceiver;
         
         currentTicketId = 1;
         ticketsSold = 0;
@@ -118,7 +135,10 @@ contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
             originalOwner: msg.sender,
             purchasePrice: ticketPrice,
             purchaseTimestamp: block.timestamp,
-            name: ticketName
+            name: ticketName,
+            artCategory: artCategory,
+            ticketNumber: ticketsSold + 1,    // Sequential number starting from 1
+            totalTickets: ticketsAmount
         });
         
         // Update user mappings
@@ -126,12 +146,34 @@ contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         hasTicket[msg.sender] = true;
         ticketsSold++;
         
+        // Calculate revenue distribution: 80% creator, 20% treasury
+        uint256 totalRevenue = ticketPrice;
+        uint256 creatorShare = (totalRevenue * 80) / 100;  // 80%
+        uint256 treasuryShare = totalRevenue - creatorShare; // 20%
+        
+        // Distribute revenue
+        bool creatorSuccess = false;
+        bool treasurySuccess = false;
+        
+        if (creatorShare > 0) {
+            (creatorSuccess, ) = payable(creator).call{value: creatorShare}("");
+        }
+        
+        if (treasuryShare > 0) {
+            (treasurySuccess, ) = payable(treasuryReceiver).call{value: treasuryShare}("");
+        }
+        
+        // If either transfer fails, revert the entire transaction
+        require(creatorSuccess || creatorShare == 0, "Creator payment failed");
+        require(treasurySuccess || treasuryShare == 0, "Treasury payment failed");
+        
         // Refund excess payment
         if (msg.value > ticketPrice) {
             payable(msg.sender).transfer(msg.value - ticketPrice);
         }
         
-        emit TicketMinted(ticketId, msg.sender, ticketName, ticketPrice);
+        emit TicketMinted(ticketId, msg.sender, ticketName, artCategory, ticketPrice);
+        emit RevenueDistributed(creator, treasuryReceiver, creatorShare, treasuryShare);
         
         return ticketId;
     }
@@ -146,7 +188,10 @@ contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         uint256 purchasePrice,
         uint256 purchaseTimestamp,
         string memory name,
-        string memory metadataURI
+        string memory artCategory_,
+        string memory metadataURI,
+        uint256 ticketNumber,
+        uint256 totalTickets
     ) {
         require(_ownerOf(ticketId) != address(0), "Ticket does not exist");
         
@@ -158,7 +203,10 @@ contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
             ticket.purchasePrice,
             ticket.purchaseTimestamp,
             ticket.name,
-            tokenURI(ticketId)
+            ticket.artCategory,
+            tokenURI(ticketId),
+            ticket.ticketNumber,
+            ticket.totalTickets
         );
     }
 
@@ -184,13 +232,15 @@ contract TicketFactory is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         uint256 totalTickets,
         uint256 soldTickets,
         uint256 remainingTickets,
-        uint256 price
+        uint256 price,
+        string memory artCategory_
     ) {
         return (
             ticketsAmount,
             ticketsSold,
             ticketsAmount - ticketsSold,
-            ticketPrice
+            ticketPrice,
+            artCategory
         );
     }
 
