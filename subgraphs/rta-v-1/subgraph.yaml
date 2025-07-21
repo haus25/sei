@@ -1,0 +1,62 @@
+specVersion: 0.0.5
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: EventFactory
+    network: sei-atlantic
+    source:
+      address: "0xA7597B8b9914b15d22d9E1fFc247dA17a37c260D"
+      abi: EventFactory
+      startBlock: 185386104
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - Event
+        - EventCreated
+        - MetadataUpdated
+        - ReservePriceUpdated
+        - EventFinalized
+        - EventFinalizedAndTransferred
+      abis:
+        - name: EventFactory
+          file: ./abis/EventFactory.json
+        - name: TicketKiosk
+          file: ./abis/TicketKiosk.json
+      eventHandlers:
+        - event: EventCreated(indexed uint256,indexed address,uint256,uint256,string,string,address)
+          handler: handleEventCreated
+        - event: MetadataUpdated(indexed uint256,string)
+          handler: handleMetadataUpdated
+        - event: ReservePriceUpdated(indexed uint256,uint256)
+          handler: handleReservePriceUpdated
+        - event: EventFinalized(indexed uint256)
+          handler: handleEventFinalized
+        - event: EventFinalizedAndTransferred(indexed uint256,indexed address)
+          handler: handleEventFinalizedAndTransferred
+      file: ./src/event-factory.ts
+templates:
+  - kind: ethereum/contract
+    name: TicketKiosk
+    network: sei-atlantic
+    source:
+      abi: TicketKiosk
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - Ticket
+        - TicketMinted
+        - RevenueDistributed
+      abis:
+        - name: TicketKiosk
+          file: ./abis/TicketKiosk.json
+      eventHandlers:
+        - event: TicketMinted(indexed uint256,indexed address,string,string,uint256)
+          handler: handleTicketMinted
+        - event: RevenueDistributed(indexed address,indexed address,uint256,uint256)
+          handler: handleRevenueDistributed
+      file: ./src/ticket-kiosk.ts 

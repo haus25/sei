@@ -1,0 +1,164 @@
+type Event @entity(immutable: false) {
+  id: ID!
+  eventId: BigInt!
+  creator: Bytes!
+  startDate: BigInt!
+  eventDuration: BigInt!
+  reservePrice: BigInt!
+  metadataURI: String!
+  artCategory: String!
+  kioskAddress: Bytes!
+  finalized: Boolean!
+  createdAtTimestamp: BigInt!
+  createdAtBlockNumber: BigInt!
+  updatedAtTimestamp: BigInt!
+  
+  # Derived fields
+  tickets: [Ticket!]! @derivedFrom(field: "event")
+  ticketsSold: BigInt!
+  totalRevenue: BigInt!
+  
+  # Event specific fields
+  highestTipper: Bytes
+  finalizedAtTimestamp: BigInt
+  finalizedAtBlockNumber: BigInt
+}
+
+type Ticket @entity(immutable: false) {
+  id: ID!
+  ticketId: BigInt!
+  event: Event!
+  eventId: BigInt!
+  owner: Bytes!
+  originalOwner: Bytes!
+  purchasePrice: BigInt!
+  purchaseTimestamp: BigInt!
+  ticketName: String!
+  artCategory: String!
+  ticketNumber: BigInt!
+  totalTickets: BigInt!
+  kioskAddress: TicketKiosk!
+  
+  # Transaction details
+  mintedAtTimestamp: BigInt!
+  mintedAtBlockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type TicketKiosk @entity(immutable: false) {
+  id: ID!
+  address: Bytes!
+  eventId: BigInt!
+  event: Event!
+  creator: Bytes!
+  ticketsAmount: BigInt!
+  ticketPrice: BigInt!
+  artCategory: String!
+  ticketsSold: BigInt!
+  totalRevenue: BigInt!
+  
+  # Derived fields
+  tickets: [Ticket!]! @derivedFrom(field: "kioskAddress")
+  
+  # Creation details
+  createdAtTimestamp: BigInt!
+  createdAtBlockNumber: BigInt!
+}
+
+type RevenueDistribution @entity(immutable: false) {
+  id: ID!
+  event: Event!
+  ticket: Ticket!
+  creator: Bytes!
+  treasury: Bytes!
+  creatorAmount: BigInt!
+  treasuryAmount: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+# Event log entities for detailed tracking
+type EventCreatedLog @entity(immutable: true) {
+  id: ID!
+  eventId: BigInt!
+  creator: Bytes!
+  startDate: BigInt!
+  reservePrice: BigInt!
+  metadataURI: String!
+  artCategory: String!
+  ticketKioskAddress: Bytes!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type MetadataUpdatedLog @entity(immutable: true) {
+  id: ID!
+  eventId: BigInt!
+  newMetadataURI: String!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type ReservePriceUpdatedLog @entity(immutable: true) {
+  id: ID!
+  eventId: BigInt!
+  newPrice: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type EventFinalizedLog @entity(immutable: true) {
+  id: ID!
+  eventId: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type EventFinalizedAndTransferredLog @entity(immutable: true) {
+  id: ID!
+  eventId: BigInt!
+  highestTipper: Bytes!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type TicketMintedLog @entity(immutable: true) {
+  id: ID!
+  ticketId: BigInt!
+  buyer: Bytes!
+  ticketName: String!
+  artCategory: String!
+  price: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+type RevenueDistributedLog @entity(immutable: true) {
+  id: ID!
+  creator: Bytes!
+  treasury: Bytes!
+  creatorAmount: BigInt!
+  treasuryAmount: BigInt!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  transactionHash: Bytes!
+}
+
+# Global stats
+type GlobalStats @entity(immutable: false) {
+  id: ID!
+  totalEvents: BigInt!
+  totalTickets: BigInt!
+  totalRevenue: BigInt!
+  totalActiveEvents: BigInt!
+  totalFinalizedEvents: BigInt!
+  lastUpdatedTimestamp: BigInt!
+  lastUpdatedBlockNumber: BigInt!
+} 
