@@ -28,7 +28,6 @@ contract LiveTipping is
         uint256 totalTips;
         address highestTipper;
         uint256 highestTip;
-        bool active;
         bool finalized;
         mapping(address => uint256) tips;
         mapping(address => uint256) tipCounts;
@@ -53,7 +52,6 @@ contract LiveTipping is
 
     // Custom errors for bytecode optimization
     error EventNotRegistered();
-    error EventNotActive();
     error EventAlreadyFinalized();
     error EventNotStarted();
     error EventEnded();
@@ -91,13 +89,11 @@ contract LiveTipping is
     
     event EventFinalized(
         uint256 indexed eventId,
-        address indexed winner,
+        address indexed highestTipper,
         uint256 totalTips,
         bool reservePriceMet
     );
     
-    event EventActivated(uint256 indexed eventId);
-    event EventDeactivated(uint256 indexed eventId);
     event TipsDistributed(uint256 indexed eventId, address indexed distributor, uint256 amount);
 
     modifier onlyEventFactory() {
@@ -112,11 +108,6 @@ contract LiveTipping is
 
     modifier eventExists(uint256 eventId) {
         if (eventTipping[eventId].creator == address(0)) revert EventNotRegistered();
-        _;
-    }
-
-    modifier eventIsActive(uint256 eventId) {
-        if (!eventTipping[eventId].active) revert EventNotActive();
         _;
     }
 
@@ -176,40 +167,9 @@ contract LiveTipping is
         eventData.totalTips = 0;
         eventData.highestTipper = address(0);
         eventData.highestTip = 0;
-        eventData.active = false; // Will be activated when stream starts
         eventData.finalized = false;
 
         emit EventRegistered(eventId, creator, startDate, endDate, reservePrice);
-    }
-
-    /**
-     * @dev Activate tipping for an event (called when stream starts)
-     */
-    function activateEvent(uint256 eventId) 
-        external 
-        eventExists(eventId) 
-        onlyEventCreator(eventId) 
-        whenNotPaused 
-    {
-        if (eventTipping[eventId].active) revert InvalidInput();
-        if (eventTipping[eventId].finalized) revert EventAlreadyFinalized();
-        if (block.timestamp < eventTipping[eventId].startDate) revert EventNotStarted();
-        if (block.timestamp > eventTipping[eventId].endDate) revert EventEnded();
-
-        eventTipping[eventId].active = true;
-        emit EventActivated(eventId);
-    }
-
-    /**
-     * @dev Deactivate tipping for an event (emergency stop)
-     */
-    function deactivateEvent(uint256 eventId) 
-        external 
-        eventExists(eventId) 
-        onlyEventCreator(eventId) 
-    {
-        eventTipping[eventId].active = false;
-        emit EventDeactivated(eventId);
     }
 
     /**
@@ -222,7 +182,6 @@ contract LiveTipping is
         external 
         payable 
         eventExists(eventId) 
-        eventIsActive(eventId) 
         eventInProgress(eventId) 
         nonReentrant 
         whenNotPaused 
@@ -272,7 +231,7 @@ contract LiveTipping is
         eventExists(eventId) 
         onlyEventCreator(eventId) 
         nonReentrant 
-        returns (address winner, uint256 totalTips, bool reservePriceMet) 
+        returns (address highestTipper, uint256 totalTips, bool reservePriceMet) 
     {
         EventTippingData storage eventData = eventTipping[eventId];
         
@@ -280,11 +239,14 @@ contract LiveTipping is
         if (block.timestamp < eventData.endDate) revert EventNotEnded();
 
         eventData.finalized = true;
-        eventData.active = false;
 
         totalTips = eventData.totalTips;
         reservePriceMet = totalTips >= eventData.reservePrice;
-        winner = reservePriceMet ? eventData.highestTipper : eventData.creator;
+        highestTipper = reservePriceMet ? eventData.highestTipper : eventData.creator;
+
+        emit EventFinalized(eventId, highestTipper, totalTips, reservePriceMet);
+        
+        return (highestTipper, totalTips, reservePriceMet);
     }
     
     /**
@@ -308,6 +270,12 @@ contract LiveTipping is
     {
         EventTippingData storage eventData = eventTipping[eventId];
         
+        // Calculate if event is currently active (within time bounds and not finalized)
+        uint256 currentTime = block.timestamp;
+        bool isActive = currentTime >= eventData.startDate && 
+                       currentTime <= eventData.endDate && 
+                       !eventData.finalized;
+        
         return (
             eventData.creator,
             eventData.startDate,
@@ -316,7 +284,7 @@ contract LiveTipping is
             eventData.totalTips,
             eventData.highestTipper,
             eventData.highestTip,
-            eventData.active,
+            isActive,
             eventData.finalized
         );
     }
@@ -388,7 +356,7 @@ contract LiveTipping is
     {
         EventTippingData storage eventData = eventTipping[eventId];
         
-        if (!eventData.active || eventData.finalized) return false;
+        if (eventData.finalized) return false;
         
         uint256 currentTime = block.timestamp;
         return currentTime >= eventData.startDate && currentTime <= eventData.endDate;

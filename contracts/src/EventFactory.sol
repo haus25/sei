@@ -164,6 +164,15 @@ contract EventFactory is ERC721URIStorage, Ownable {
         // 4. Register the new event with the Distributor
         IDistributor(distributorContract).registerEvent(newEventId, creator);
 
+        // 5. Register the new event with LiveTipping
+        ILiveTipping(liveTippingContract).registerEvent(
+            newEventId, 
+            creator, 
+            startDate, 
+            eventDuration, // duration in minutes
+            reservePrice
+        );
+
         emit EventCreated(newEventId, creator, startDate, reservePrice, metadataURI, artCategory, ticketKioskAddress);
         
         return newEventId;

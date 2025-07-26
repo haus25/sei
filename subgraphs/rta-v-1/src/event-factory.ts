@@ -4,8 +4,12 @@ import {
   MetadataUpdated as MetadataUpdatedEvent,
   ReservePriceUpdated as ReservePriceUpdatedEvent,
   EventFinalized as EventFinalizedEvent,
-  EventFinalizedAndTransferred as EventFinalizedAndTransferredEvent
+  EventFinalizedAndTransferred as EventFinalizedAndTransferredEvent,
+  EventFactory
 } from "../generated/EventFactory/EventFactory"
+import {
+  TicketKiosk as TicketKioskContract
+} from "../generated/templates/TicketKiosk/TicketKiosk"
 import {
   Event,
   EventCreatedLog,
@@ -19,12 +23,23 @@ import {
 import { TicketKiosk as TicketKioskTemplate } from "../generated/templates"
 
 export function handleEventCreated(event: EventCreatedEvent): void {
+  // Get complete event data from contract
+  let eventFactoryContract = EventFactory.bind(event.address)
+  let eventDataResult = eventFactoryContract.try_getEvent(event.params.eventId)
+  
   // Create or update the main Event entity
   let eventEntity = new Event(event.params.eventId.toString())
   eventEntity.eventId = event.params.eventId
   eventEntity.creator = event.params.creator
   eventEntity.startDate = event.params.startDate
-  eventEntity.eventDuration = BigInt.fromI32(0) // This will need to be updated from contract
+  
+  // Get eventDuration from contract call if successful
+  if (!eventDataResult.reverted) {
+    eventEntity.eventDuration = eventDataResult.value.eventDuration
+  } else {
+    eventEntity.eventDuration = BigInt.fromI32(0) // Default if call fails
+  }
+  
   eventEntity.reservePrice = event.params.reservePrice
   eventEntity.metadataURI = event.params.metadataURI
   eventEntity.artCategory = event.params.artCategory
@@ -53,23 +68,40 @@ export function handleEventCreated(event: EventCreatedEvent): void {
   eventLog.transactionHash = event.transaction.hash
   eventLog.save()
 
-  // Create TicketKiosk entity
+  // Create TicketKiosk entity and get kiosk data from TicketKiosk contract
   let kioskEntity = new TicketKiosk(event.params.ticketKioskAddress.toHex())
   kioskEntity.address = event.params.ticketKioskAddress
   kioskEntity.eventId = event.params.eventId
   kioskEntity.event = event.params.eventId.toString()
   kioskEntity.creator = event.params.creator
-  kioskEntity.ticketsAmount = BigInt.fromI32(0) // Will be updated when we get kiosk events
-  kioskEntity.ticketPrice = BigInt.fromI32(0) // Will be updated when we get kiosk events
   kioskEntity.artCategory = event.params.artCategory
   kioskEntity.ticketsSold = BigInt.fromI32(0)
   kioskEntity.totalRevenue = BigInt.fromI32(0)
   kioskEntity.createdAtTimestamp = event.block.timestamp
   kioskEntity.createdAtBlockNumber = event.block.number
-  kioskEntity.save()
-
-  // Start indexing the TicketKiosk contract
+  
+  // Start indexing the TicketKiosk contract first
   TicketKioskTemplate.create(event.params.ticketKioskAddress)
+  
+  // Try to bind to the TicketKiosk contract to get ticketsAmount and ticketPrice
+  let ticketKioskContract = TicketKioskContract.bind(event.params.ticketKioskAddress)
+  
+  // Set default values first
+  kioskEntity.ticketsAmount = BigInt.fromI32(0)
+  kioskEntity.ticketPrice = BigInt.fromI32(0)
+  
+  // Try to get actual values from contract
+  let ticketsAmountCall = ticketKioskContract.try_ticketsAmount()
+  if (!ticketsAmountCall.reverted) {
+    kioskEntity.ticketsAmount = ticketsAmountCall.value
+  }
+  
+  let ticketPriceCall = ticketKioskContract.try_ticketPrice()
+  if (!ticketPriceCall.reverted) {
+    kioskEntity.ticketPrice = ticketPriceCall.value
+  }
+  
+  kioskEntity.save()
 
   // Update global stats
   updateGlobalStats(event.block.timestamp, event.block.number, true, false)
