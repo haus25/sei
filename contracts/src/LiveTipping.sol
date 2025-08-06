@@ -363,6 +363,31 @@ contract LiveTipping is
     }
 
     /**
+     * @dev Returns the total amount of tips accumulated for a specific event.
+     */
+    function getTotalTips(uint256 eventId) 
+        external 
+        view 
+        eventExists(eventId) 
+        returns (uint256) 
+    {
+        return eventTipping[eventId].totalTips;
+    }
+
+    /**
+     * @dev Returns the address of the user who has contributed the most tips.
+     * Returns address(0) if there are no tippers.
+     */
+    function getHighestTipper(uint256 eventId) 
+        external 
+        view 
+        eventExists(eventId) 
+        returns (address) 
+    {
+        return eventTipping[eventId].highestTipper;
+    }
+
+    /**
      * @dev Update treasury address (only owner)
      */
     function updateTreasury(address _treasury) external onlyOwner {
