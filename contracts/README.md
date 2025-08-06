@@ -1,6 +1,6 @@
-# Real-Time Asset (RTA) Smart Contract Suite
+# Real-Time Asset (RTA) Protocol Suite
 
-A comprehensive blockchain-based platform for real-time event creation, curation, tipping, and NFT ownership transfer on SEI network.
+The RTA standard introduces a new asset class where the Real-Time Asset (dynamic streaming NFT) allows the creation, curation, live-tipping, and Video NFT ownership transfer for live events that acquire value in real-time, in the making. At the time of writing (08/06/25) the RTA standard is exclusive to the SEI network.
 
 ## Architecture Overview
 
@@ -299,39 +299,6 @@ Our comprehensive test suite (26 passing tests) validates:
 forge script script/Haus.s.sol --rpc-url $SEI_TESTNET_RPC --broadcast
 ```
 
-## Development
-
-### Prerequisites
-- Foundry toolkit
-- Node.js 18+
-- SEI testnet access
-
-### Build
-
-```shell
-forge build
-```
-
-### Test
-
-```shell
-# Run all tests
-forge test
-
-# Run specific test suite
-forge test --match-path "test/DelegationPatterns.t.sol"
-forge test --match-path "test/FinalizationLogic.t.sol"
-
-# Run with verbose output
-forge test -vv
-```
-
-### Test Coverage
-
-```shell
-forge coverage
-```
-
 ## Core Interaction Patterns
 
 ### For Event Creators
@@ -391,13 +358,3 @@ distributor.enableCuration(eventId, 300, CurationScope.SCOPE_2); // 3%
 - CREATE2 for deterministic TicketKiosk addresses
 - Efficient storage patterns and custom errors
 - Batch operations where possible
-
-## Integration
-
-The contract suite integrates with:
-- Frontend React application for user interactions
-- XMTP for messaging
-- The Graph for event indexing
-- SEI blockchain for fast, low-cost transactions
-
-For detailed integration examples, see the `/haus` frontend application.
