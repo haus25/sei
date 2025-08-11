@@ -29,7 +29,11 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     // Mapping to store who is the authorized delegate for an event's proxy
     mapping(uint256 => address) public eventDelegates;
 
+    // Global whitelist for scope agents - these addresses can modify ANY event
+    mapping(address => bool) public globalWhitelist;
+
     // --- Events ---
+    event GlobalWhitelistUpdated(address indexed agent, bool indexed whitelisted);
     event DelegationProxyCreated(uint256 indexed eventId, address proxyAddress, address indexed delegatee);
     event DelegateUpdated(uint256 indexed eventId, address indexed newDelegatee);
     event CreationWrapperUpdated(address indexed newCreationWrapper);
@@ -63,6 +67,30 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         }
         creationWrapper = _creationWrapper;
         emit CreationWrapperUpdated(_creationWrapper);
+    }
+
+    /**
+     * @dev Adds or removes an address from the global whitelist. Only owner can call this.
+     * Whitelisted addresses can modify metadata for ANY event without per-event delegation.
+     */
+    function setGlobalWhitelist(address agent, bool whitelisted) external onlyOwner {
+        if (agent == address(0)) {
+            revert InvalidAddress();
+        }
+        globalWhitelist[agent] = whitelisted;
+        emit GlobalWhitelistUpdated(agent, whitelisted);
+    }
+
+    /**
+     * @dev Batch whitelist multiple agents at once. Only owner can call this.
+     */
+    function batchSetGlobalWhitelist(address[] calldata agents, bool whitelisted) external onlyOwner {
+        for (uint256 i = 0; i < agents.length; i++) {
+            if (agents[i] != address(0)) {
+                globalWhitelist[agents[i]] = whitelisted;
+                emit GlobalWhitelistUpdated(agents[i], whitelisted);
+            }
+        }
     }
 
     /**
@@ -142,11 +170,13 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
 
     /**
      * @dev Main function to update an event's metadata.
-     * Checks if the caller is the creator OR the authorized delegate via the proxy.
+     * Checks if the caller is the creator, authorized delegate, or globally whitelisted.
      */
     function updateMetadata(uint256 eventId, string memory newMetadataURI) external {
-        // Authorization: Caller must be the original creator or the registered delegate for this event.
-        if (eventFactory.ownerOf(eventId) != msg.sender && eventDelegates[eventId] != msg.sender) {
+        // Authorization: Caller must be the original creator, registered delegate, or globally whitelisted
+        if (eventFactory.ownerOf(eventId) != msg.sender && 
+            eventDelegates[eventId] != msg.sender && 
+            !globalWhitelist[msg.sender]) {
             revert NotAuthorized();
         }
         
@@ -156,15 +186,35 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     }
     
     function updateReservePrice(uint256 eventId, uint256 newReservePrice) external {
+        // Authorization: Caller must be the original creator, registered delegate, or globally whitelisted
+        if (eventFactory.ownerOf(eventId) != msg.sender && 
+            eventDelegates[eventId] != msg.sender && 
+            !globalWhitelist[msg.sender]) {
+            revert NotAuthorized();
+        }
+        
         _authorize(eventId);
         eventFactory.setReservePrice(eventId, newReservePrice);
     }
 
     function finalizeRTA(uint256 eventId) external {
-        if (eventFactory.ownerOf(eventId) != msg.sender && eventDelegates[eventId] != msg.sender) {
+        // Check authorization: only creator, delegatee, or globally whitelisted can finalize
+        if (eventFactory.ownerOf(eventId) != msg.sender && 
+            eventDelegates[eventId] != msg.sender && 
+            !globalWhitelist[msg.sender]) {
             revert NotAuthorized();
         }
-        _authorize(eventId);
+        
+        // Get event data to check timing
+        IEventFactory.EventData memory eventData = eventFactory.getEvent(eventId);
+        
+        // Check if event has ended (startDate + duration * 60 seconds)
+        uint256 eventEndTime = eventData.startDate + (eventData.eventDuration * 60);
+        if (block.timestamp <= eventEndTime) {
+            revert("Event has not ended yet");
+        }
+        
+        // Finalize and transfer the NFT
         eventFactory.finalizeAndTransfer(eventId);
     }
 
@@ -172,10 +222,12 @@ contract EventManager is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     
     /**
      * @dev Internal function to authorize access to event operations.
-     * Checks if the caller is the event owner or authorized delegate.
+     * Checks if the caller is the event owner, authorized delegate, or globally whitelisted.
      */
     function _authorize(uint256 eventId) internal view {
-        if (eventFactory.ownerOf(eventId) != msg.sender && eventDelegates[eventId] != msg.sender) {
+        if (eventFactory.ownerOf(eventId) != msg.sender && 
+            eventDelegates[eventId] != msg.sender && 
+            !globalWhitelist[msg.sender]) {
             revert NotAuthorized();
         }
     }

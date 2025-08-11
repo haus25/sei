@@ -1,44 +1,35 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IEventFactory.sol";
 
 /**
  * @title Curation
- * @dev Standalone curation contract for managing curation across all events
+ * @dev Per-event curation contract for managing curation services
  * References EventFactory to validate events and manage curation services
  */
 contract Curation is 
-    Initializable,
-    OwnableUpgradeable,
-    UUPSUpgradeable,
-    ReentrancyGuardUpgradeable
+    Ownable,
+    ReentrancyGuard
 {
-    struct CurationData {
-        address curator;
-        uint256 curatorFee;      // Percentage fee (1-10)
-        uint256 scope;           // Curation scope (1-3)
-        string description;
-        bool active;
-        uint256 totalEarnings;
-        uint256 totalWithdrawn;
-        uint256 startDate;       // When curation starts
-        uint256 endDate;         // When curation ends
-    }
-
-    // Event ID => CurationData
-    mapping(uint256 => CurationData) public eventCuration;
-    // Curator => Event IDs
-    mapping(address => uint256[]) public curatorEvents;
-    // Event ID => Curator => pending balance
-    mapping(uint256 => mapping(address => uint256)) public pendingBalances;
+    // Per-event curation data - no mapping needed since this is a per-event contract
+    uint256 public eventId;
+    address public curator;
+    uint256 public curatorFee;      // Percentage fee (1-10)
+    uint256 public scope;           // Curation scope (1-3)
+    string public description;
+    bool public active;
+    uint256 public totalEarnings;
+    uint256 public totalWithdrawn;
+    uint256 public startDate;       // When curation starts
+    uint256 public endDate;         // When curation ends
+    uint256 public pendingBalance;  // Pending balance for the curator
     
     address public eventFactoryAddress;
     address public distributorContract;
+    address public eventCreator;
     
     // Constants for gas optimization
     uint256 private constant MAX_CURATOR_FEE = 10; // 10% max
@@ -79,100 +70,93 @@ contract Curation is
         _;
     }
 
-    modifier onlyEventCreator(uint256 eventId) {
-        // Get event creator from EventFactory
-        IEventFactory.EventData memory eventData = IEventFactory(eventFactoryAddress).getEvent(eventId);
-        address creator = eventData.creator;
-        if (msg.sender != creator) revert OnlyEventCreator();
+    modifier onlyEventCreator() {
+        if (msg.sender != eventCreator) revert OnlyEventCreator();
         _;
     }
 
-    modifier onlyCurator(uint256 eventId) {
-        if (msg.sender != eventCuration[eventId].curator) revert OnlyCurator();
+    modifier onlyCurator() {
+        if (msg.sender != curator) revert OnlyCurator();
         _;
     }
 
-    modifier curationActive(uint256 eventId) {
-        if (!eventCuration[eventId].active) revert CurationNotActive();
+    modifier curationActive() {
+        if (!active) revert CurationNotActive();
         _;
     }
 
-    modifier curationNotExpired(uint256 eventId) {
-        if (block.timestamp > eventCuration[eventId].endDate) revert CurationExpired();
+    modifier curationNotExpired() {
+        if (block.timestamp > endDate) revert CurationExpired();
         _;
-    }
-
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
-
-    function initialize(
-        address _owner,
-        address _eventFactoryAddress,
-        address _distributorContract
-    ) public initializer {
-        __Ownable_init(_owner);
-        __UUPSUpgradeable_init();
-        __ReentrancyGuard_init();
-
-        if (_eventFactoryAddress == address(0)) revert InvalidInput();
-        
-        eventFactoryAddress = _eventFactoryAddress;
-        distributorContract = _distributorContract;
     }
 
     /**
-     * @dev Initialize curation service for an event
+     * @dev Constructor for per-event Curation instance
      */
-    function initializeCuration(
-        uint256 eventId,
+    constructor(
+        uint256 _eventId,
+        address _eventFactoryAddress,
+        address _eventCreator,
         address _curator,
         uint256 _curatorFee,
         uint256 _scope,
         string memory _description,
-        uint256 _startDate,
-        uint256 _endDate
-    ) external onlyEventCreator(eventId) {
+        address _distributorContract
+    ) Ownable(_eventCreator) {
+        if (_eventFactoryAddress == address(0)) revert InvalidInput();
+        if (_eventCreator == address(0)) revert InvalidInput();
         if (_curator == address(0)) revert InvalidCuratorAddress();
         if (_curatorFee < 1 || _curatorFee > MAX_CURATOR_FEE) revert InvalidCuratorFee();
         if (_scope < 1 || _scope > MAX_SCOPE) revert InvalidScope();
-        if (eventCuration[eventId].active) revert CurationAlreadyActive();
+        
+        eventId = _eventId;
+        eventFactoryAddress = _eventFactoryAddress;
+        eventCreator = _eventCreator;
+        curator = _curator;
+        curatorFee = _curatorFee;
+        scope = _scope;
+        description = _description;
+        distributorContract = _distributorContract;
+        active = true;
+        totalEarnings = 0;
+        totalWithdrawn = 0;
+        pendingBalance = 0;
+        
+        // Set default dates - can be updated later
+        startDate = block.timestamp;
+        endDate = block.timestamp + 365 days; // Default 1 year
+    }
+
+    /**
+     * @dev Update curation dates (only by event creator before start)
+     */
+    function updateDates(
+        uint256 _startDate,
+        uint256 _endDate
+    ) external onlyEventCreator {
+        if (block.timestamp >= startDate) revert InvalidInput();
         if (_startDate >= _endDate) revert InvalidInput();
         if (_startDate <= block.timestamp) revert InvalidInput();
 
-        eventCuration[eventId] = CurationData({
-            curator: _curator,
-            curatorFee: _curatorFee,
-            scope: _scope,
-            description: _description,
-            active: true,
-            totalEarnings: 0,
-            totalWithdrawn: 0,
-            startDate: _startDate,
-            endDate: _endDate
-        });
+        startDate = _startDate;
+        endDate = _endDate;
 
-        // Add event to curator's list
-        curatorEvents[_curator].push(eventId);
-
-        emit CurationActivated(eventId, _curator, _curatorFee, _scope, _startDate, _endDate);
+        emit CurationActivated(eventId, curator, curatorFee, scope, _startDate, _endDate);
     }
 
     /**
      * @dev Update curation parameters (only before start date)
      */
     function updateCuration(
-        uint256 eventId,
         uint256 _curatorFee,
         uint256 _scope
-    ) external onlyEventCreator(eventId) curationActive(eventId) {
-        if (block.timestamp >= eventCuration[eventId].startDate) revert InvalidInput();
+    ) external onlyEventCreator curationActive {
+        if (block.timestamp >= startDate) revert InvalidInput();
         if (_curatorFee < 1 || _curatorFee > MAX_CURATOR_FEE) revert InvalidCuratorFee();
         if (_scope < 1 || _scope > MAX_SCOPE) revert InvalidScope();
 
-        eventCuration[eventId].curatorFee = _curatorFee;
-        eventCuration[eventId].scope = _scope;
+        curatorFee = _curatorFee;
+        scope = _scope;
 
         emit CurationUpdated(eventId, _curatorFee, _scope);
     }
@@ -180,36 +164,36 @@ contract Curation is
     /**
      * @dev Deactivate curation service
      */
-    function deactivateCuration(uint256 eventId) external onlyEventCreator(eventId) {
-        if (!eventCuration[eventId].active) revert CurationNotActive();
+    function deactivateCuration() external onlyEventCreator {
+        if (!active) revert CurationNotActive();
         
-        eventCuration[eventId].active = false;
-        emit CurationDeactivated(eventId, eventCuration[eventId].curator);
+        active = false;
+        emit CurationDeactivated(eventId, curator);
     }
 
     /**
      * @dev Receive funds from distribution (called by Distributor)
      */
-    function receiveFunds(uint256 eventId, address curator) external payable {
+    function receiveFunds() external payable {
         if (msg.sender != distributorContract) revert OnlyEventFactory();
-        if (!eventCuration[eventId].active) revert CurationNotActive();
+        if (!active) revert CurationNotActive();
         if (msg.value == 0) revert InvalidInput();
 
-        eventCuration[eventId].totalEarnings += msg.value;
-        pendingBalances[eventId][curator] += msg.value;
+        totalEarnings += msg.value;
+        pendingBalance += msg.value;
 
         emit FundsReceived(eventId, curator, msg.value);
     }
 
     /**
-     * @dev Withdraw pending balance for a specific event
+     * @dev Withdraw pending balance
      */
-    function withdrawBalance(uint256 eventId) external nonReentrant onlyCurator(eventId) {
-        uint256 amount = pendingBalances[eventId][msg.sender];
+    function withdrawBalance() external nonReentrant onlyCurator {
+        uint256 amount = pendingBalance;
         if (amount == 0) revert NoBalanceToWithdraw();
 
-        pendingBalances[eventId][msg.sender] = 0;
-        eventCuration[eventId].totalWithdrawn += amount;
+        pendingBalance = 0;
+        totalWithdrawn += amount;
 
         (bool success, ) = msg.sender.call{value: amount}("");
         if (!success) revert TransferFailed();
@@ -217,117 +201,79 @@ contract Curation is
         emit FundsWithdrawn(eventId, msg.sender, amount);
     }
 
-    /**
-     * @dev Withdraw all pending balances for curator
-     */
-    function withdrawAllBalances() external nonReentrant {
-        uint256[] memory events = curatorEvents[msg.sender];
-        uint256 totalAmount = 0;
 
-        for (uint256 i = 0; i < events.length; i++) {
-            uint256 eventId = events[i];
-            uint256 amount = pendingBalances[eventId][msg.sender];
-            
-            if (amount > 0) {
-                pendingBalances[eventId][msg.sender] = 0;
-                eventCuration[eventId].totalWithdrawn += amount;
-                totalAmount += amount;
-                
-                emit FundsWithdrawn(eventId, msg.sender, amount);
-            }
-        }
-
-        if (totalAmount == 0) revert NoBalanceToWithdraw();
-
-        (bool success, ) = msg.sender.call{value: totalAmount}("");
-        if (!success) revert TransferFailed();
-    }
 
     /**
-     * @dev Get curation status for an event
+     * @dev Get curation status
      */
-    function getCurationStatus(uint256 eventId) external view returns (bool active, bool expired) {
-        CurationData storage curation = eventCuration[eventId];
-        active = curation.active;
-        expired = block.timestamp > curation.endDate;
+    function getCurationStatus() external view returns (bool, bool) {
+        bool expired = block.timestamp > endDate;
         return (active, expired);
     }
 
     /**
-     * @dev Get curator address for an event
+     * @dev Get curator address
      */
-    function getCurator(uint256 eventId) external view returns (address) {
-        return eventCuration[eventId].curator;
+    function getCurator() external view returns (address) {
+        return curator;
     }
 
     /**
-     * @dev Get curator fee for an event
+     * @dev Helper for Distributor to compute enforced fee by scope
      */
-    function getCuratorFee(uint256 eventId) external view returns (uint256) {
-        return eventCuration[eventId].curatorFee;
+    function getScopeFee(uint256 _scope) external pure returns (uint256 feeBasisPoints) {
+        if (_scope == 1) return 300;   // 3%
+        if (_scope == 2) return 700;   // 7%
+        if (_scope == 3) return 1000;  // 10%
+        return 0;
     }
 
     /**
-     * @dev Get curation scope for an event
+     * @dev Get curator fee
      */
-    function getCurationScope(uint256 eventId) external view returns (uint256) {
-        return eventCuration[eventId].scope;
+    function getCuratorFee() external view returns (uint256) {
+        return curatorFee;
     }
 
     /**
-     * @dev Get complete curation data for an event
+     * @dev Get curation scope
      */
-    function getCurationData(uint256 eventId) external view returns (
-        address curator,
-        uint256 curatorFee,
-        uint256 scope,
-        string memory description,
-        bool active,
-        uint256 totalEarnings,
-        uint256 totalWithdrawn,
-        uint256 startDate,
-        uint256 endDate
+    function getCurationScope() external view returns (uint256) {
+        return scope;
+    }
+
+    /**
+     * @dev Get complete curation data
+     */
+    function getCurationData() external view returns (
+        address,
+        uint256,
+        uint256,
+        string memory,
+        bool,
+        uint256,
+        uint256,
+        uint256,
+        uint256
     ) {
-        CurationData storage curation = eventCuration[eventId];
         return (
-            curation.curator,
-            curation.curatorFee,
-            curation.scope,
-            curation.description,
-            curation.active,
-            curation.totalEarnings,
-            curation.totalWithdrawn,
-            curation.startDate,
-            curation.endDate
+            curator,
+            curatorFee,
+            scope,
+            description,
+            active,
+            totalEarnings,
+            totalWithdrawn,
+            startDate,
+            endDate
         );
     }
 
     /**
-     * @dev Get pending balance for curator in specific event
+     * @dev Get pending balance for curator
      */
-    function getPendingBalance(uint256 eventId, address curator) external view returns (uint256) {
-        return pendingBalances[eventId][curator];
-    }
-
-    /**
-     * @dev Get total pending balance for curator across all events
-     */
-    function getTotalPendingBalance(address curator) external view returns (uint256) {
-        uint256[] memory events = curatorEvents[curator];
-        uint256 totalBalance = 0;
-
-        for (uint256 i = 0; i < events.length; i++) {
-            totalBalance += pendingBalances[events[i]][curator];
-        }
-
-        return totalBalance;
-    }
-
-    /**
-     * @dev Get events curated by a specific curator
-     */
-    function getCuratorEvents(address curator) external view returns (uint256[] memory) {
-        return curatorEvents[curator];
+    function getPendingBalance() external view returns (uint256) {
+        return pendingBalance;
     }
 
     /**
@@ -362,12 +308,6 @@ contract Curation is
     function getContractBalance() external view returns (uint256) {
         return address(this).balance;
     }
-
-    function _authorizeUpgrade(address newImplementation)
-        internal
-        onlyOwner
-        override
-    {}
 
     // Receive function to accept ETH
     receive() external payable {}

@@ -1,43 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/**
- * @title IEventFactory
- * Defines all external functions, structs, and events that other contracts can interact with.
- */
-interface IEventFactory {
-    // --- Structs ---
-    // The core data structure for an event, returned by getEvent().
+import "@openzeppelin/contracts/interfaces/IERC721.sol";
+
+interface IEventFactory is IERC721 {
     struct EventData {
-        address creator;
-        uint256 startDate;
-        uint256 eventDuration;
-        uint256 reservePrice;
-        string metadataURI;
-        string artCategory;
-        address ticketKioskAddress;
-        bool finalized;
+        address creator;        // 20 bytes
+        address KioskAddress;   // 20 bytes (packed in slot 1)
+        address curationAddress; // 20 bytes (packed in slot 2) 
+        uint96 startDate;       // 12 bytes (packed with creator in slot 0)
+        uint96 eventDuration;   // 12 bytes (packed with KioskAddress in slot 1)
+        uint96 reservePrice;    // 12 bytes (packed with curationAddress in slot 2)
+        bool finalized;         // 1 byte (packed with reservePrice)
+        string metadataURI;     // separate slot
+        string artCategory;     // separate slot
     }
 
-    // --- Events ---
-    event EventCreated(
-        uint256 indexed eventId,
-        address indexed creator,
-        uint256 startDate,
-        uint256 reservePrice,
-        string metadataURI,
-        string artCategory,
-        address ticketKioskAddress
-    );
-    event MetadataUpdated(uint256 indexed eventId, string newMetadataURI);
-    event ReservePriceUpdated(uint256 indexed eventId, uint256 newReservePrice);
-    event EventFinalizedAndTransferred(uint256 indexed eventId, address indexed highestTipper);
-
-    // --- Core Functions ---
-
-    /**
-     * @dev Creates a new RTA NFT event.
-     */
     function createEvent(
         uint256 startDate,
         uint256 eventDuration,
@@ -48,9 +26,6 @@ interface IEventFactory {
         uint256 ticketPrice
     ) external returns (uint256 eventId);
 
-    /**
-     * @dev Creates a new RTA NFT event for a specific creator.
-     */
     function createEventForCreator(
         address creator,
         uint256 startDate,
@@ -62,42 +37,38 @@ interface IEventFactory {
         uint256 ticketPrice
     ) external returns (uint256 eventId);
 
-    // --- State-Changing Functions (Callable only by EventManager) ---
+    function deployCurationForEvent(
+        uint256 eventId,
+        uint256 scope,
+        string calldata description
+    ) external returns (address curationAddress);
 
-    /**
-     * @dev Allows the authorized EventManager to update the metadata URI.
-     */
+    function getCurationContract(uint256 eventId) external view returns (address);
+    function getTicketKiosk(uint256 eventId) external view returns (address);
+    function getEvent(uint256 eventId) external view returns (EventData memory);
+    function totalEvents() external view returns (uint256);
+    function getCreatorEvents(address creator) external view returns (uint256[] memory);
+    function getAllTicketKiosks() external view returns (uint256[] memory eventIds, address[] memory kioskAddresses);
+    
+    // EventManager functions
     function setMetadataURI(uint256 eventId, string memory newMetadataURI) external;
-
-    /**
-     * @dev Allows the authorized EventManager to update the reserve price.
-     */
     function setReservePrice(uint256 eventId, uint256 newReservePrice) external;
-
-    /**
-     * @dev Allows the authorized EventManager to finalize an event and transfer the NFT.
-     */
     function finalizeAndTransfer(uint256 eventId) external;
 
-    // --- View Functions ---
+    event EventCreated(
+        uint256 indexed eventId,
+        address indexed creator,
+        uint256 startDate,
+        uint256 reservePrice,
+        string metadataURI,
+        string artCategory,
+        address ticketKioskAddress
+    );
 
-    /**
-     * @dev Retrieves the complete data for a specific event.
-     */
-    function getEvent(uint256 eventId) external view returns (EventData memory);
-
-    /**
-     * @dev Returns the TicketKiosk address for a specific event.
-     */
-    function getTicketKiosk(uint256 eventId) external view returns (address);
-
-    /**
-     * @dev Returns all TicketKiosk addresses and their corresponding event IDs.
-     */
-    function getAllTicketKiosks() external view returns (uint256[] memory eventIds, address[] memory kioskAddresses);
-
-    /**
-     * @dev Returns the owner of the specified RTA NFT. From ERC721.
-     */
-    function ownerOf(uint256 eventId) external view returns (address);
+    event CurationDeployed(
+        uint256 indexed eventId,
+        address indexed creator,
+        address curationContract,
+        uint256 scope
+    );
 }

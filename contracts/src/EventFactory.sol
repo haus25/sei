@@ -3,8 +3,7 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Create2.sol";
-import "./TicketKiosk.sol";
+import "./libraries/EventFactoryLib.sol";
 import "../interfaces/IDistributor.sol";
 import "../interfaces/IEventManager.sol";
 import "../interfaces/ILiveTipping.sol";
@@ -20,14 +19,15 @@ import "../interfaces/ILiveTipping.sol";
  */
 contract EventFactory is ERC721URIStorage, Ownable {
     struct EventData {
-        address creator;
-        uint256 startDate;
-        uint256 eventDuration;
-        uint256 reservePrice;
-        string metadataURI;
-        string artCategory;
-        address KioskAddress;
-        bool finalized;
+        address creator;        // 20 bytes
+        address KioskAddress;   // 20 bytes (packed in slot 1)
+        address curationAddress; // 20 bytes (packed in slot 2) 
+        uint96 startDate;       // 12 bytes (packed with creator in slot 0)
+        uint96 eventDuration;   // 12 bytes (packed with KioskAddress in slot 1)
+        uint96 reservePrice;    // 12 bytes (packed with curationAddress in slot 2)
+        bool finalized;         // 1 byte (packed with reservePrice)
+        string metadataURI;     // separate slot
+        string artCategory;     // separate slot
     }
 
     // State variables
@@ -52,6 +52,12 @@ contract EventFactory is ERC721URIStorage, Ownable {
         string artCategory,
         address ticketKioskAddress
     );
+    event CurationDeployed(
+        uint256 indexed eventId,
+        address indexed creator,
+        address curationContract,
+        uint256 scope
+    );
     event MetadataUpdated(uint256 indexed eventId, string newMetadataURI);
     event ReservePriceUpdated(uint256 indexed eventId, uint256 newPrice);
     event EventFinalizedAndTransferred(uint256 indexed eventId, address indexed highestTipper);
@@ -65,6 +71,9 @@ contract EventFactory is ERC721URIStorage, Ownable {
     error ReservePriceNotMet();
     error NoTippers();
     error StartDateHasPassed();
+    error EventNotEndedYet();
+    error AlreadyInitialized();
+    error OnlyOwner();
 
     /**
      * @dev Constructor that initializes the contract
@@ -84,9 +93,8 @@ contract EventFactory is ERC721URIStorage, Ownable {
         address _liveTipping,
         address _treasuryReceiver
     ) external {
-        // Only allow initialization once and only by the current owner
-        require(eventManagerContract == address(0), "Already initialized");
-        require(msg.sender == owner(), "Only owner can initialize");
+        if (eventManagerContract != address(0)) revert AlreadyInitialized();
+        if (msg.sender != owner()) revert OnlyOwner();
         
         eventManagerContract = _eventManager;
         distributorContract = _distributor;
@@ -98,6 +106,8 @@ contract EventFactory is ERC721URIStorage, Ownable {
             _transferOwnership(_owner);
         }
     }
+
+
 
     /**
      * @dev Creates a new RTA NFT event and deploys its associated TicketKiosk.
@@ -137,6 +147,10 @@ contract EventFactory is ERC721URIStorage, Ownable {
         uint256 ticketsAmount,
         uint256 ticketPrice
     ) public returns (uint256 eventId) {
+        // Validate inputs fit in optimized storage
+        require(startDate <= type(uint96).max, "Start date too large");
+        require(eventDuration <= type(uint96).max, "Duration too large");
+        require(reservePrice <= type(uint96).max, "Reserve price too large");
         uint256 newEventId = currentEventId++;
 
         // 1. Mint RTA NFT to the creator
@@ -144,33 +158,35 @@ contract EventFactory is ERC721URIStorage, Ownable {
         _setTokenURI(newEventId, metadataURI);
 
         // 2. Deploy TicketKiosk for this event using CREATE2 for a deterministic address
-        address ticketKioskAddress = _deployTicketKiosk(newEventId, creator, ticketsAmount, ticketPrice, artCategory);
+        address ticketKioskAddress = EventFactoryLib.deployTicketKiosk(
+            newEventId, address(this), creator, ticketsAmount, ticketPrice, artCategory, treasuryReceiver
+        );
         if (ticketKioskAddress == address(0)) revert DeploymentFailed();
 
-        // 3. Store event data
+        // 3. Store event data (optimized storage packing)
         events[newEventId] = EventData({
             creator: creator,
-            startDate: startDate,
-            eventDuration: eventDuration,
-            reservePrice: reservePrice,
-            metadataURI: metadataURI,
-            artCategory: artCategory,
             KioskAddress: ticketKioskAddress,
-            finalized: false
+            curationAddress: address(0), // Will be set when curation is activated
+            startDate: uint96(startDate),
+            eventDuration: uint96(eventDuration),
+            reservePrice: uint96(reservePrice),
+            finalized: false,
+            metadataURI: metadataURI,
+            artCategory: artCategory
         });
 
         creatorEvents[creator].push(newEventId);
 
-        // 4. Register the new event with the Distributor
-        IDistributor(distributorContract).registerEvent(newEventId, creator);
-
-        // 5. Register the new event with LiveTipping
-        ILiveTipping(liveTippingContract).registerEvent(
-            newEventId, 
-            creator, 
-            startDate, 
-            eventDuration, // duration in minutes
-            reservePrice
+        // 4. Register with external contracts using library
+        EventFactoryLib.registerWithExternalContracts(
+            newEventId,
+            creator,
+            startDate,
+            eventDuration,
+            reservePrice,
+            distributorContract,
+            liveTippingContract
         );
 
         emit EventCreated(newEventId, creator, startDate, reservePrice, metadataURI, artCategory, ticketKioskAddress);
@@ -185,8 +201,8 @@ contract EventFactory is ERC721URIStorage, Ownable {
      * The EventManager is responsible for handling all permission logic (e.g., only creator or delegate).
      */
     function setMetadataURI(uint256 eventId, string memory newMetadataURI) external {
-        if (msg.sender != eventManagerContract) revert("Only EventManager allowed");
-        if (events[eventId].finalized) revert("Event already finalized");
+        if (msg.sender != eventManagerContract) revert OnlyEventManager();
+        if (events[eventId].finalized) revert EventAlreadyFinalized();
         
         events[eventId].metadataURI = newMetadataURI;
         _setTokenURI(eventId, newMetadataURI);
@@ -201,8 +217,9 @@ contract EventFactory is ERC721URIStorage, Ownable {
         if (msg.sender != eventManagerContract) revert OnlyEventManager();
         if (events[eventId].finalized) revert EventAlreadyFinalized();
         if (block.timestamp >= events[eventId].startDate) revert StartDateHasPassed();
+        require(newReservePrice <= type(uint96).max, "Reserve price too large");
 
-        events[eventId].reservePrice = newReservePrice;
+        events[eventId].reservePrice = uint96(newReservePrice);
         emit ReservePriceUpdated(eventId, newReservePrice);
     }
 
@@ -210,49 +227,96 @@ contract EventFactory is ERC721URIStorage, Ownable {
      * @dev Allows the authorized EventManager contract to finalize an event.
      */
     function setFinalized(uint256 eventId) external {
-        if (msg.sender != eventManagerContract) revert("Only EventManager allowed");
-        if (events[eventId].finalized) revert("Event already finalized");
+        if (msg.sender != eventManagerContract) revert OnlyEventManager();
+        if (events[eventId].finalized) revert EventAlreadyFinalized();
 
         events[eventId].finalized = true;
         emit EventFinalized(eventId);
     }
 
     /**
-     * @dev Business logic function for transfer.
+     * @dev Business logic function for finalization and transfer.
      * Called by the EventManager to check conditions and transfer the NFT.
+     * Integrates with LiveTipping for complete finalization flow.
      */
     function finalizeAndTransfer(uint256 eventId) external {
-        if (msg.sender != eventManagerContract) revert("Only EventManager allowed");
-        if (events[eventId].finalized) revert("Event already finalized");
+        if (msg.sender != eventManagerContract) revert OnlyEventManager();
+        if (events[eventId].finalized) revert EventAlreadyFinalized();
 
-        // 1. Business Logic Check: Call LiveTipping to get data
+        // 1. Get current event data
+        EventData storage eventData = events[eventId];
+        
+        // 2. Verify event has ended
+        uint256 eventEndTime = eventData.startDate + (eventData.eventDuration * 60);
+        if (block.timestamp <= eventEndTime) revert EventNotEndedYet();
+        
+        // 3. Get tipping data from LiveTipping contract
         ILiveTipping tippingContract = ILiveTipping(liveTippingContract);
         uint256 totalTips = tippingContract.getTotalTips(eventId);
         
-        if (totalTips < events[eventId].reservePrice) {
-            revert("Reserve Price not met");
-        }
+        // 4. Check if reserve price is met
+        if (totalTips < eventData.reservePrice) revert ReservePriceNotMet();
 
-         // 2. Get Highest Tipper
+        // 5. Get highest tipper
         address highestTipper = tippingContract.getHighestTipper(eventId);
         if (highestTipper == address(0)) {
             revert NoTippers();
         }
         
-        // 3. Finalize State
-        events[eventId].finalized = true;
+        // 6. Mark event as finalized first
+        eventData.finalized = true;
 
-        // 4. Transfer NFT to the highest tipper
-        _transfer(events[eventId].creator, highestTipper, eventId);
+        // 7. Transfer NFT to the highest tipper
+        _transfer(eventData.creator, highestTipper, eventId);
         
+        // 8. Emit finalization event
         emit EventFinalizedAndTransferred(eventId, highestTipper);
+        
+        // 9. Note: Fund distribution is handled separately through the Distributor contract
+        // The tips remain in the LiveTipping contract until explicitly distributed
     }
     
+    /**
+     * @dev Deploy curation contract for an event (only by event creator)
+     */
+    function deployCurationForEvent(
+        uint256 eventId,
+        uint256 scope,
+        string calldata description
+    ) external returns (address curationAddress) {
+        require(events[eventId].creator == msg.sender, "Only event creator can deploy curation");
+        require(events[eventId].curationAddress == address(0), "Curation already deployed");
+        require(scope >= 1 && scope <= 3, "Invalid scope");
+
+        // Deploy Curation contract using CREATE2 for deterministic address
+        curationAddress = EventFactoryLib.deployCuration(
+            eventId, address(this), msg.sender, scope, description, distributorContract
+        );
+        if (curationAddress == address(0)) revert DeploymentFailed();
+
+        // Update event data
+        events[eventId].curationAddress = curationAddress;
+
+        // Register curation with Distributor using library
+        EventFactoryLib.registerCurationWithDistributor(eventId, curationAddress, distributorContract);
+
+        emit CurationDeployed(eventId, msg.sender, curationAddress, scope);
+        
+        return curationAddress;
+    }
+
     /**
      * @dev Returns the TicketKiosk address for a specific event.
      */
     function getTicketKiosk(uint256 eventId) external view returns (address) {
         return events[eventId].KioskAddress;
+    }
+
+    /**
+     * @dev Returns the Curation address for a specific event.
+     */
+    function getCurationContract(uint256 eventId) external view returns (address) {
+        return events[eventId].curationAddress;
     }
 
     /**
@@ -301,20 +365,6 @@ contract EventFactory is ERC721URIStorage, Ownable {
     }
 
     // Internal & View Functions
-    function _deployTicketKiosk(
-        uint256 eventId,
-        address creator,
-        uint256 ticketsAmount, 
-        uint256 ticketPrice,
-        string memory artCategory
-    ) internal returns (address) {
-        bytes memory bytecode = abi.encodePacked(
-            type(TicketKiosk).creationCode,
-            abi.encode(eventId, address(this), creator, ticketsAmount, ticketPrice, artCategory, treasuryReceiver)
-        );
-        bytes32 salt = keccak256(abi.encodePacked(eventId, "ticketkiosk"));
-        return Create2.deploy(0, salt, bytecode);
-    }
 
     function _baseURI() internal pure override returns (string memory) {
         return ""; // URIs are set individually

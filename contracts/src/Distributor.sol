@@ -8,11 +8,18 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "../interfaces/IEventFactory.sol";
 
+/// @dev Minimal interface for per-event Curation contract integration
+interface ICurationMinimal {
+    function getCurator() external view returns (address);
+    function getCurationScope() external view returns (uint256);
+    function getCuratorFee() external view returns (uint256);
+}
+
 /**
  * @title Distributor
  * @dev Standalone contract for managing tip distribution and revenue sharing across all events
- * Fee structure: 80% creator, 20% treasury (max), curation 0-10% (comes from treasury portion)
- * Curation Scopes: Scope 1 (<3%), Scope 2 (3-6%), Scope 3 (6%+)
+ * Fee structure: 85% creator (max), 15% treasury, curation 0-10% (comes from creator portion)
+ * Curation Scopes: Scope 1 (3%), Scope 2 (7%), Scope 3 (10%)
  * Only whitelisted addresses can curate through proxy
  */
 contract Distributor is
@@ -24,15 +31,15 @@ contract Distributor is
 {
     enum CurationScope {
         NONE,       // 0% - No curation
-        SCOPE_1,    // <3% - Basic curation
-        SCOPE_2,    // 3-6% - Advanced curation  
-        SCOPE_3     // 6%+ - Premium curation
+        SCOPE_1,    // 3% - Planner
+        SCOPE_2,    // 7% - Promoter
+        SCOPE_3     // 10% - Producer
     }
 
     struct EventDistributionConfig {
-        uint256 creatorShare;   // Always 8000 (80%)
-        uint256 treasuryShare;  // Always 2000 (20%) - base treasury share
-        uint256 curationFee;    // 0-1000 (0-10%) - comes from treasury portion
+        uint256 creatorShare;   // 8500 (85%) - base creator share
+        uint256 treasuryShare;  // Always 2000 (15%)
+        uint256 curationFee;    // 0-1000 (0-10%) - comes from creator portion
         CurationScope curationScope;
         address curator;        // Whitelisted curator address
         bool curationEnabled;
@@ -64,13 +71,12 @@ contract Distributor is
 
     // Constants for gas optimization
     uint256 private constant BASIS_POINTS = 10000; // 100%
-    uint256 private constant CREATOR_SHARE = 8000; // 80%
-    uint256 private constant TREASURY_BASE_SHARE = 2000; // 20%
+    uint256 private constant CREATOR_BASE_SHARE = 8500; // 85%
+    uint256 private constant TREASURY_SHARE = 1500; // 15%
     uint256 private constant MAX_CURATION_FEE = 1000; // 10%
-    uint256 private constant SCOPE_1_MAX = 299; // <3%
-    uint256 private constant SCOPE_2_MIN = 300; // 3%
-    uint256 private constant SCOPE_2_MAX = 599; // <6%
-    uint256 private constant SCOPE_3_MIN = 600; // 6%+
+    uint256 private constant SCOPE_1 = 300;
+    uint256 private constant SCOPE_2 = 700;
+    uint256 private constant SCOPE_3 = 1000;
 
     // Custom errors for bytecode optimization
     error EventNotRegistered();
@@ -173,8 +179,8 @@ contract Distributor is
         if (eventConfigs[eventId].creatorShare > 0) revert InvalidInput();
 
         eventConfigs[eventId] = EventDistributionConfig({
-            creatorShare: CREATOR_SHARE,
-            treasuryShare: TREASURY_BASE_SHARE,
+            creatorShare: CREATOR_BASE_SHARE,
+            treasuryShare: TREASURY_SHARE,
             curationFee: 0,
             curationScope: CurationScope.NONE,
             curator: address(0),
@@ -183,11 +189,44 @@ contract Distributor is
 
         totalEvents++;
 
-        emit EventRegistered(eventId, creator, CREATOR_SHARE, TREASURY_BASE_SHARE);
+        emit EventRegistered(eventId, creator, CREATOR_BASE_SHARE, TREASURY_SHARE);
     }
 
     /**
-     * @dev Enable curation for an event by whitelisted curator
+     * @dev Enable curation automatically when curation contract is deployed (called by EventFactory)
+     * Gets curation details directly from the deployed curation contract
+     */
+    function enableCurationFromContract(
+        uint256 eventId,
+        address _curationContract
+    ) external onlyEventFactory {
+        if (_curationContract == address(0)) revert InvalidInput();
+        
+        // Get curation details from the deployed contract
+        ICurationMinimal curation = ICurationMinimal(_curationContract);
+        uint256 scope = curation.getCurationScope();
+        uint256 fee = curation.getCuratorFee();
+        address curator = curation.getCurator();
+        
+        // Validate scope and convert to enum
+        CurationScope curationScope;
+        if (scope == 1) curationScope = CurationScope.SCOPE_1;
+        else if (scope == 2) curationScope = CurationScope.SCOPE_2;
+        else if (scope == 3) curationScope = CurationScope.SCOPE_3;
+        else revert InvalidCurationScope();
+        
+        // Update event configuration
+        EventDistributionConfig storage config = eventConfigs[eventId];
+        config.curationFee = fee;
+        config.curationScope = curationScope;
+        config.curator = curator;
+        config.curationEnabled = true;
+        
+        emit CurationEnabled(eventId, curator, fee, curationScope);
+    }
+
+    /**
+     * @dev Enable curation for an event by whitelisted curator or curation contract
      * @param eventId The event ID
      * @param curationFee Fee in basis points (0-1000 = 0-10%)
      * @param scope Curation scope (1, 2, or 3)
@@ -196,22 +235,58 @@ contract Distributor is
         uint256 eventId,
         uint256 curationFee,
         CurationScope scope
-    ) external eventExists(eventId) onlyWhitelistedCurator {
+    ) external eventExists(eventId) {
         if (curationFee > MAX_CURATION_FEE) revert InvalidCurationFee();
         if (scope == CurationScope.NONE) revert InvalidCurationScope();
         
         // Validate curation fee matches scope
-        if (scope == CurationScope.SCOPE_1 && curationFee > SCOPE_1_MAX) revert InvalidCurationScope();
-        if (scope == CurationScope.SCOPE_2 && (curationFee < SCOPE_2_MIN || curationFee > SCOPE_2_MAX)) revert InvalidCurationScope();
-        if (scope == CurationScope.SCOPE_3 && curationFee < SCOPE_3_MIN) revert InvalidCurationScope();
+        if (scope == CurationScope.SCOPE_1 && curationFee > SCOPE_1) revert InvalidCurationScope();
+        if (scope == CurationScope.SCOPE_2 && (curationFee < SCOPE_2 || curationFee > SCOPE_2)) revert InvalidCurationScope();
+        if (scope == CurationScope.SCOPE_3 && curationFee < SCOPE_3) revert InvalidCurationScope();
         
-        // Check if curator is allowed to use this scope
-        if (scope > curatorMaxScope[msg.sender]) revert InvalidCurationScope();
+        // Get event data to check if this is from the curation contract
+        IEventFactory.EventData memory eventData = IEventFactory(eventFactoryAddress).getEvent(eventId);
+        address eventCurationContract = eventData.curationAddress;
+        
+        // Check authorization: either whitelisted curator or the event's curation contract
+        bool isAuthorized = false;
+        if (eventCurationContract != address(0) && msg.sender == eventCurationContract) {
+            // Called from curation contract - authorize
+            isAuthorized = true;
+        } else if (whitelistedCurators[msg.sender] && scope <= curatorMaxScope[msg.sender]) {
+            // Called by whitelisted curator with proper scope
+            isAuthorized = true;
+        }
+        
+        if (!isAuthorized) revert OnlyWhitelistedCurator();
         
         EventDistributionConfig storage config = eventConfigs[eventId];
-        config.curationFee = curationFee;
+        // If invoked by the event's Curation contract, enforce platform fee mapping by scope
+        if (eventCurationContract != address(0) && msg.sender == eventCurationContract) {
+            uint256 enforcedFee = curationFee;
+            if (scope == CurationScope.SCOPE_1) {
+                enforcedFee = 300; // 3%
+            } else if (scope == CurationScope.SCOPE_2) {
+                enforcedFee = 700; // 7%
+            } else if (scope == CurationScope.SCOPE_3) {
+                enforcedFee = 1000; // 10%
+            }
+            config.curationFee = enforcedFee;
+        } else {
+            // External whitelisted curators must supply a valid fee matching scope validation above
+            config.curationFee = curationFee;
+        }
         config.curationScope = scope;
-        config.curator = msg.sender;
+        
+        // Set curator: if called from curation contract, get curator from that contract
+        if (eventCurationContract != address(0) && msg.sender == eventCurationContract) {
+            // Resolve actual curator address from per-event Curation contract
+            address curatorAddr = ICurationMinimal(eventCurationContract).getCurator();
+            config.curator = curatorAddr;
+        } else {
+            config.curator = msg.sender;
+        }
+        
         config.curationEnabled = true;
         
         emit CurationEnabled(eventId, msg.sender, curationFee, scope);
@@ -255,7 +330,7 @@ contract Distributor is
         address eventOwner = eventData.creator;
         
         // Calculate distribution amounts
-        uint256 creatorAmount = (amountToDistribute * CREATOR_SHARE) / BASIS_POINTS;
+        uint256 creatorAmount = (amountToDistribute * CREATOR_BASE_SHARE) / BASIS_POINTS;
         uint256 treasuryAmount = amountToDistribute - creatorAmount;
         uint256 curationAmount = 0;
         
@@ -398,13 +473,12 @@ contract Distributor is
      * @dev Get curation scope details
      */
     function getCurationScopeRanges() external pure returns (
-        uint256 scope1Max,
-        uint256 scope2Min,
-        uint256 scope2Max,
-        uint256 scope3Min,
+        uint256 scope1,
+        uint256 scope2,
+        uint256 scope3,
         uint256 maxCurationFee
     ) {
-        return (SCOPE_1_MAX, SCOPE_2_MIN, SCOPE_2_MAX, SCOPE_3_MIN, MAX_CURATION_FEE);
+        return (SCOPE_1, SCOPE_2, SCOPE_3, MAX_CURATION_FEE);
     }
 
     /**
@@ -467,8 +541,8 @@ contract Distributor is
         override
     {}
 
-    // Receive function to accept ETH
+    // Receive function to accept SEI
     receive() external payable {
-        // Accept ETH for distribution
+        // Accept SEI for distribution
     }
 }
